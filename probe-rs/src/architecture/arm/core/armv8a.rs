@@ -110,6 +110,39 @@ impl<'probe> Armv8a<'probe> {
         Ok(core)
     }
 
+    /// Clears stuck data in DTR
+    fn clear_dtr(&mut self) -> Result<(), Error> {
+        let address = Edscr::get_mmio_address_from_base(self.base_address)?;
+        let edscr = Edscr(self.memory.read_word_32(address)?);
+
+        if edscr.rxfull() {
+            tracing::warn!("clearing pending DTRRX");
+            self.with_core_halted(|armv8a| {
+                armv8a.prepare_for_clobber(0)?;
+                if armv8a.state.is_64_bit {
+                    // MRS DBGDTR_EL0, X0
+                    let instruction = aarch64::build_mrs(2, 3, 0, 4, 0, 0);
+
+                    armv8a.execute_instruction(instruction)?;
+                } else {
+                    // MCR p14, #0, r0, c0, c5, #0 (read from rDTR)
+                    let instruction = build_mrc(14, 0, 0, 0, 5, 0);
+
+                    armv8a.execute_instruction(instruction)?;
+                }
+                Ok(())
+            })?;
+        }
+
+        if edscr.txfull() {
+            tracing::warn!("clearing pending DTRTX");
+            let address = Dbgdtrtx::get_mmio_address_from_base(self.base_address)?;
+            self.memory.read_word_32(address)?;
+        }
+
+        Ok(())
+    }
+
     /// Execute an instruction
     fn execute_instruction(&mut self, instruction: u32) -> Result<Edscr, Error> {
         if !self.state.current_state.is_halted() {
@@ -1351,6 +1384,8 @@ impl CoreInterface for Armv8a<'_> {
     }
 
     fn clear_hw_breakpoint(&mut self, bp_unit_index: usize) -> Result<(), Error> {
+        self.clear_dtr().expect("clear DTR");
+
         let bp_value_addr =
             Dbgbvr::get_mmio_address_from_base(self.base_address)? + (bp_unit_index * 16) as u64;
         let bp_control_addr =
